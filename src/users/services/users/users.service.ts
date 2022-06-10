@@ -1,69 +1,54 @@
-import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
-import { PrismaService } from 'src/database/services/prisma.service';
-import { User } from '@prisma/client';
+import {
+  ForbiddenException,
+  HttpException,
+  HttpStatus,
+  Injectable,
+} from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { User } from 'src/database/typeorm/entities/User';
 import { CreateUserDto } from 'src/users/dtos/CreateUser.dto';
+import { UserNotFoundException } from 'src/users/exceptions/UserNotFound.exception';
+import { comparePasswords, encodePassword } from 'src/utils/bcrypt';
+import { Repository } from 'typeorm';
 
 @Injectable()
 export class UsersService {
-  constructor(private prismaService: PrismaService) {}
-
-  async getUsers(): Promise<Omit<User, 'password'>[]> {
-    const users = await this.prismaService.user.findMany({
-      select: {
-        id: true,
-        username: true,
-        password: false,
-        email: true,
-      },
-    });
+  constructor(
+    @InjectRepository(User)
+    private usersRepository: Repository<User>,
+  ) {}
+  async getUsers(): Promise<User[]> {
+    const users = await this.usersRepository.find();
     return users;
   }
-
-  async getUserByUsername(
-    username: string,
-  ): Promise<Omit<User, 'password'>[] | undefined> {
-    const user = await this.prismaService.user.findMany({
-      where: {
-        username: {
-          contains: username,
-        },
-      },
-      select: {
-        id: true,
-        username: true,
-        password: false,
-        email: true,
-      },
-    });
-    return user;
+  async validateUser(email: string, password: string) {
+    const userExists = await this.usersRepository.findOne({ where: { email } });
+    if (!userExists) throw new UserNotFoundException('User not found!');
+    const validPassword = await comparePasswords(password, userExists.password);
+    if (!validPassword)
+      throw new ForbiddenException('Password does not match!');
+    return userExists;
   }
-
-  async getUserById(id: number): Promise<Omit<User, 'password'> | undefined> {
-    const user = await this.prismaService.user.findFirst({
-      where: {
-        id,
-      },
-      select: {
-        id: true,
-        username: true,
-        password: false,
-        email: true,
-      },
-    });
-    return user;
-  }
-
   async createUser(data: CreateUserDto) {
-    const userExists = await this.prismaService.user.findFirst({
+    const { email, password } = data;
+    const hashedPassword = await encodePassword(password);
+    const userExists = await this.usersRepository.findOne({
       where: {
-        email: data.email,
+        email,
       },
     });
-    if (!userExists) {
-      return this.prismaService.user.create({
-        data,
-      });
+    if (userExists) {
+      throw new HttpException('User already exists!', HttpStatus.FORBIDDEN);
     }
-    throw new HttpException('User already exists!', HttpStatus.FORBIDDEN);
+    const user = this.usersRepository
+      .create({ ...data, password: hashedPassword })
+      .save();
+    return user;
+  }
+
+  async findUserByEmail(email: string) {
+    const user = this.usersRepository.findOne({ where: { email } });
+    if (!user) throw new UserNotFoundException('User not found!');
+    return user;
   }
 }
